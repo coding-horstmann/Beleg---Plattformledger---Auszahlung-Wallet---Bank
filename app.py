@@ -14,7 +14,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - startup helper
 
 from reconcile.evidence import build_document_evidence, build_open_bank_after_evidence
 from reconcile.annual_reports import build_etsy_accountable_comparison, build_etsy_annual_reconciliation
-from reconcile.leftovers import build_leftover_candidate_report
+from reconcile.leftovers import build_hypothesis_candidate_report, build_leftover_candidate_report
 from reconcile.llm import LlmConfig, dataframe_records, suggest_match
 from reconcile.matching import (
     MatchSettings,
@@ -114,23 +114,28 @@ def main() -> None:
     platform_files = [uploaded_to_tuple(file) for file in platform_uploads]
 
     if accountable_file is None or not bank_files:
+        show_required_data()
         st.info("Bitte Accountable-Datei und mindestens eine Bank-CSV laden.")
         return
 
     if not st.session_state["analysis_requested"]:
-        st.success("Dateien sind ausgewählt. Starte die Analyse links in der Sidebar, wenn du bereit bist.")
-        st.dataframe(
-            pd.DataFrame(
-                [
-                    {"Bereich": "Accountable", "Status": "bereit", "Dateien": accountable_file[0]},
-                    {"Bereich": "Bank", "Status": "bereit", "Dateien": ", ".join(name for name, _ in bank_files)},
-                    {"Bereich": "PayPal", "Status": "optional bereit" if paypal_file else "nicht geladen", "Dateien": paypal_file[0] if paypal_file else ""},
-                    {"Bereich": "Plattformen", "Status": "optional bereit" if platform_files else "nicht geladen", "Dateien": ", ".join(name for name, _ in platform_files)},
-                ]
-            ),
-            hide_index=True,
-            use_container_width=True,
-        )
+        requirement_tab, upload_tab = st.tabs(["BENÖTIGTE DATEN", "Aktueller Upload"])
+        with requirement_tab:
+            show_required_data()
+        with upload_tab:
+            st.success("Dateien sind ausgewählt. Starte die Analyse links in der Sidebar, wenn du bereit bist.")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {"Bereich": "Accountable", "Status": "bereit", "Dateien": accountable_file[0]},
+                        {"Bereich": "Bank", "Status": "bereit", "Dateien": ", ".join(name for name, _ in bank_files)},
+                        {"Bereich": "PayPal", "Status": "optional bereit" if paypal_file else "nicht geladen", "Dateien": paypal_file[0] if paypal_file else ""},
+                        {"Bereich": "Plattformen", "Status": "optional bereit" if platform_files else "nicht geladen", "Dateien": ", ".join(name for name, _ in platform_files)},
+                    ]
+                ),
+                hide_index=True,
+                use_container_width=True,
+            )
         st.info("Das normale Komplett-Matching nutzt keine KI. KI wird nur später im KI-Fallback-Tab per Klick verwendet.")
         return
 
@@ -201,29 +206,31 @@ def main() -> None:
         platform_package_report,
     )
 
-    tabs = st.tabs(["Belegketten", "FYRST-Matches", "Umsatz-Auslastung", "Plausibilität", "Plattformdaten", "Offene Belege", "Offene Bankumsätze", "Restprüfung", "PayPal-Brücke", "KI-Fallback", "Export"])
+    tabs = st.tabs(["BENÖTIGTE DATEN", "Belegketten", "FYRST-Matches", "Umsatz-Auslastung", "Plausibilität", "Plattformdaten", "Offene Belege", "Offene Bankumsätze", "Restprüfung", "PayPal-Brücke", "KI-Fallback", "Export"])
     with tabs[0]:
+        show_required_data()
+    with tabs[1]:
         show_document_evidence(document_evidence)
         show_manual_report_editor(document_evidence)
-    with tabs[1]:
-        show_matches(matches, links)
     with tabs[2]:
-        show_bank_claim_usage(bank_claim_usage)
+        show_matches(matches, links)
     with tabs[3]:
-        show_overall_plausibility(overall_plausibility_report)
+        show_bank_claim_usage(bank_claim_usage)
     with tabs[4]:
-        show_platform_support(platform_transactions, platform_doc_matches, platform_doc_links, platform_bank_matches, platform_package_report, etsy_annual_report, etsy_accountable_comparison)
+        show_overall_plausibility(overall_plausibility_report)
     with tabs[5]:
-        show_open_docs(open_docs, bank)
+        show_platform_support(platform_transactions, platform_doc_matches, platform_doc_links, platform_bank_matches, platform_package_report, etsy_annual_report, etsy_accountable_comparison)
     with tabs[6]:
-        show_open_bank(open_bank)
+        show_open_docs(open_docs, bank)
     with tabs[7]:
-        show_leftover_review(open_docs, open_bank)
+        show_open_bank(open_bank)
     with tabs[8]:
-        show_paypal_bridge(paypal, paypal_doc_matches, paypal_doc_links, paypal_bank_matches)
+        show_leftover_review(open_docs, open_bank)
     with tabs[9]:
-        show_llm_fallback(open_bank, open_docs, settings)
+        show_paypal_bridge(paypal, paypal_doc_matches, paypal_doc_links, paypal_bank_matches)
     with tabs[10]:
+        show_llm_fallback(open_bank, open_docs, settings)
+    with tabs[11]:
         show_export(
             docs,
             bank,
@@ -253,6 +260,77 @@ def uploaded_to_tuple(upload) -> tuple[str, bytes] | None:
     if upload is None:
         return None
     return upload.name, upload.getvalue()
+
+
+def show_required_data() -> None:
+    st.markdown(
+        """
+        <div class="required-data-callout">
+            <div class="required-data-title">Benötigte Daten für einen guten Abgleich</div>
+            <div class="required-data-copy">
+                Pflicht sind Accountable und FYRST. PayPal- und Plattformdateien machen die Sammelzahlungen nachvollziehbar und verbessern vor allem Etsy, eBay, Shopify, Printful und Gelato.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    required = pd.DataFrame(
+        [
+            {
+                "Priorität": "Pflicht",
+                "Datei / Export": "Accountable Export",
+                "Typischer Dateiname": "Daten.xlsx oder Accountable CSV",
+                "Wofür": "Alle Einnahmen, Ausgaben, Belegnummern, Beträge und Gegenparteien.",
+            },
+            {
+                "Priorität": "Pflicht",
+                "Datei / Export": "FYRST Bank-CSV",
+                "Typischer Dateiname": "fyrst.csv",
+                "Wofür": "Hauptkonto: Zahlungseingänge, Lastschriften, Auszahlungen und Sammelumsätze.",
+            },
+            {
+                "Priorität": "Sehr wichtig bei PayPal",
+                "Datei / Export": "PayPal CSV",
+                "Typischer Dateiname": "paypal.CSV",
+                "Wofür": "PayPal als Zwischenkonto: Plattformzahlungen und PayPal-Lastschriften zu FYRST erklären.",
+            },
+        ]
+    )
+    st.subheader("Startdaten")
+    st.dataframe(required, hide_index=True, use_container_width=True)
+
+    platform_rows = [
+        {
+            "Plattform": "Etsy",
+            "Benötigte Exporte": "Etsy Payments-Verkäufe; Etsy Payments-Überweisungen; monatliche etsy_statement-Dateien",
+            "Wofür": "Bestellungen, Käufer, Gebühren, Auszahlungen, Monats-/Jahresabgleich je Shop.",
+        },
+        {
+            "Plattform": "eBay",
+            "Benötigte Exporte": "eBay Alle Bestellungen unter Berichte; eBay Abrechnungsübersicht Alle",
+            "Wofür": "Käufer, Bestellungen, Gebühren, Anzeigenkosten und eBay-Abrechnungen.",
+        },
+        {
+            "Plattform": "Shopify",
+            "Benötigte Exporte": "Shopify einfache Bestellungen; Shopify Abrechnung Gebührentabelle",
+            "Wofür": "Shopify-Bestellungen, Kunden, Gebühren und Zahlungs-/Abrechnungsdetails.",
+        },
+        {
+            "Plattform": "Printful",
+            "Benötigte Exporte": "Printful CSV",
+            "Wofür": "Produktions- und Lieferantenkosten zu Accountable-Ausgaben und PayPal/FYRST-Zahlungen.",
+        },
+        {
+            "Plattform": "Gelato",
+            "Benötigte Exporte": "Gelato Kontoauszug CSV",
+            "Wofür": "Gelato-Ausgaben, Wallet-/Zahlungsbewegungen und Abgleich zu PayPal/FYRST.",
+        },
+    ]
+    st.subheader("Plattformdaten")
+    st.dataframe(pd.DataFrame(platform_rows), hide_index=True, use_container_width=True)
+
+    st.caption("Nicht jede Plattformdatei ist immer Pflicht. Für einen belastbaren Report sollten aber alle Plattformen hochgeladen werden, über die im Zeitraum Umsätze oder Gebühren liefen.")
 
 
 def inject_css() -> None:
@@ -310,6 +388,15 @@ def inject_css() -> None:
             border-radius: 6px 6px 0 0;
             padding: 0.55rem 0.85rem;
         }
+        .stTabs [data-baseweb="tab"]:first-child {
+            background: #eff6ff;
+            border: 1px solid #bfdbfe;
+            border-bottom: 0;
+        }
+        .stTabs [data-baseweb="tab"]:first-child p {
+            color: #1d4ed8 !important;
+            font-weight: 800;
+        }
         .stTabs [data-baseweb="tab"] p {
             color: var(--app-ink) !important;
             font-weight: 600;
@@ -326,6 +413,24 @@ def inject_css() -> None:
         }
         section[data-testid="stSidebar"] {
             border-right: 1px solid var(--app-line);
+        }
+        .required-data-callout {
+            background: #eff6ff;
+            border: 1px solid #bfdbfe;
+            border-left: 6px solid var(--app-accent);
+            border-radius: 8px;
+            padding: 1rem 1.1rem;
+            margin: 0.4rem 0 1rem 0;
+        }
+        .required-data-title {
+            color: #1e3a8a;
+            font-size: 1.05rem;
+            font-weight: 800;
+            margin-bottom: 0.25rem;
+        }
+        .required-data-copy {
+            color: var(--app-ink);
+            font-size: 0.95rem;
         }
         </style>
         """,
@@ -1182,12 +1287,13 @@ def show_export(
     overall_plausibility_report: pd.DataFrame,
 ) -> None:
     try:
-        beleg_pdf, kontroll_pdf = build_pdf_report_bytes(
+        beleg_pdf, kontroll_pdf, hypothesen_pdf = build_pdf_report_bytes(
             docs,
             bank,
             paypal,
             matches,
             links,
+            settings,
             paypal_bank_matches,
             document_evidence,
             platform_transactions,
@@ -1202,7 +1308,7 @@ def show_export(
     except ModuleNotFoundError as exc:
         st.warning(f"PDF-Export braucht noch ein Paket: {exc.name}. Auf Railway wird es über requirements.txt installiert.")
     else:
-        c1, c2 = st.columns(2)
+        c1, c2, c3 = st.columns(3)
         c1.download_button(
             "Beleg-Report PDF",
             beleg_pdf,
@@ -1213,6 +1319,12 @@ def show_export(
             "Kontroll-Report PDF",
             kontroll_pdf,
             "buchhaltungs_buddy_kontroll_report.pdf",
+            "application/pdf",
+        )
+        c3.download_button(
+            "Hypothesen-Report PDF",
+            hypothesen_pdf,
+            "buchhaltungs_buddy_hypothesen_report.pdf",
             "application/pdf",
         )
 
@@ -1309,6 +1421,7 @@ def build_pdf_report_bytes(
     paypal: pd.DataFrame,
     matches: pd.DataFrame,
     links: pd.DataFrame,
+    settings: MatchSettings,
     paypal_bank_matches: pd.DataFrame,
     document_evidence: pd.DataFrame,
     platform_transactions: pd.DataFrame,
@@ -1319,18 +1432,21 @@ def build_pdf_report_bytes(
     leftover_candidate_report: pd.DataFrame,
     manual_report_edits: dict[str, dict[str, object]] | None = None,
     manual_report_summary_note: str = "",
-) -> tuple[bytes, bytes]:
+) -> tuple[bytes, bytes, bytes]:
     import scripts.build_explicit_match_report as report_pdf
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
         report_pdf.REPORT_PATH = temp_path / "buchhaltungs_buddy_beleg_report.pdf"
         report_pdf.CONTROL_REPORT_PATH = temp_path / "buchhaltungs_buddy_kontroll_report.pdf"
+        report_pdf.HYPOTHESIS_REPORT_PATH = temp_path / "buchhaltungs_buddy_hypothesen_report.pdf"
         open_doc_ids = set(document_evidence.loc[document_evidence["evidence_level"] == "offen", "doc_id"])
         open_docs = docs[docs["doc_id"].isin(open_doc_ids)].copy()
         open_bank = build_open_bank_after_evidence(bank, matches, paypal_bank_matches, platform_bank_matches)
         doc_report = report_pdf.build_doc_report(document_evidence, manual_report_edits)
         bank_report = report_pdf.build_bank_report(bank, document_evidence, matches, paypal_bank_matches, platform_bank_matches)
+        settlement_detail_report = report_pdf.build_settlement_detail_report(bank_report, document_evidence)
+        hypothesis_candidate_report = build_hypothesis_candidate_report(open_docs, open_bank, settlement_detail_report, settings)
         report_pdf.build_pdf(
             docs,
             bank,
@@ -1345,10 +1461,11 @@ def build_pdf_report_bytes(
             etsy_annual_report=etsy_annual_report,
             etsy_accountable_comparison=etsy_accountable_comparison,
             leftover_candidate_report=leftover_candidate_report,
+            hypothesis_candidate_report=hypothesis_candidate_report,
             manual_edits=manual_report_edits,
             manual_summary_note=manual_report_summary_note,
         )
-        return report_pdf.REPORT_PATH.read_bytes(), report_pdf.CONTROL_REPORT_PATH.read_bytes()
+        return report_pdf.REPORT_PATH.read_bytes(), report_pdf.CONTROL_REPORT_PATH.read_bytes(), report_pdf.HYPOTHESIS_REPORT_PATH.read_bytes()
 
 
 def manual_external_account_frame() -> pd.DataFrame:

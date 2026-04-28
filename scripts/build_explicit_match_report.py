@@ -26,6 +26,7 @@ from reconcile.paypal import match_docs_to_paypal, match_paypal_transfers_to_ban
 OUTPUT_DIR = ROOT / "outputs"
 REPORT_PATH = OUTPUT_DIR / "buchhaltungs_buddy_beleg_report.pdf"
 CONTROL_REPORT_PATH = OUTPUT_DIR / "buchhaltungs_buddy_kontroll_report.pdf"
+HYPOTHESIS_REPORT_PATH = OUTPUT_DIR / "buchhaltungs_buddy_hypothesen_report.pdf"
 
 
 def main() -> int:
@@ -58,6 +59,7 @@ def main() -> int:
     build_pdf(docs, bank, paypal, evidence, open_docs, open_bank, doc_report, bank_report)
     print(REPORT_PATH)
     print(CONTROL_REPORT_PATH)
+    print(HYPOTHESIS_REPORT_PATH)
     return 0
 
 
@@ -287,6 +289,7 @@ def build_pdf(
     etsy_annual_report: pd.DataFrame | None = None,
     etsy_accountable_comparison: pd.DataFrame | None = None,
     leftover_candidate_report: pd.DataFrame | None = None,
+    hypothesis_candidate_report: pd.DataFrame | None = None,
     manual_edits: dict[str, dict[str, object]] | pd.DataFrame | None = None,
     manual_summary_note: str = "",
 ) -> None:
@@ -295,7 +298,18 @@ def build_pdf(
         doc_report = build_doc_report(evidence, manual_by_doc)
     build_beleg_pdf(docs, bank, paypal, evidence, open_docs, open_bank, doc_report, platform_transactions, manual_summary_note)
     settlement_detail_report = build_settlement_detail_report(bank_report, evidence)
-    build_control_pdf(bank_report, open_docs, open_bank, settlement_detail_report, platform_package_report, etsy_annual_report, etsy_accountable_comparison, leftover_candidate_report)
+    build_control_pdf(
+        bank_report,
+        open_docs,
+        open_bank,
+        settlement_detail_report,
+        platform_package_report,
+        etsy_annual_report,
+        etsy_accountable_comparison,
+        leftover_candidate_report,
+        hypothesis_candidate_report,
+    )
+    build_hypothesis_pdf(hypothesis_candidate_report, open_docs, open_bank, settlement_detail_report)
 
 
 def build_beleg_pdf(
@@ -367,6 +381,7 @@ def build_control_pdf(
     etsy_annual_report: pd.DataFrame | None = None,
     etsy_accountable_comparison: pd.DataFrame | None = None,
     leftover_candidate_report: pd.DataFrame | None = None,
+    hypothesis_candidate_report: pd.DataFrame | None = None,
 ) -> None:
     pdf = SimpleDocTemplate(
         str(CONTROL_REPORT_PATH),
@@ -426,6 +441,83 @@ def build_control_pdf(
     story.append(Paragraph("9. Restprüfung: offene Belege und offene Umsätze", styles["H1"]))
     add_open_docs_table(story, styles, open_docs, "9.1 Offene Belege")
     add_open_bank_raw_table(story, styles, open_bank, "9.2 Offene Bankumsätze")
+
+    if platform_package_report is not None and not platform_package_report.empty:
+        etsy_chain = platform_package_report[platform_package_report["platform"].astype(str).str.lower().eq("etsy")].copy()
+        if not etsy_chain.empty:
+            story.append(PageBreak())
+            story.append(Paragraph("10. Etsy-Kettenprüfung: Belege, Orders, Gebühren, FYRST", styles["H1"]))
+            story.append(
+                Paragraph(
+                    "Kontrolle je Etsy-Auszahlungsperiode: Plattform-Verkäufe und -Gebühren werden den Accountable-Belegen und der FYRST-Buchung gegenübergestellt.",
+                    styles["Body"],
+                )
+            )
+            add_etsy_chain_table(story, styles, etsy_chain)
+
+    if hypothesis_candidate_report is not None and not hypothesis_candidate_report.empty:
+        story.append(PageBreak())
+        story.append(Paragraph("11. Hypothesen: offene Belege gegen Restbeträge / offene Umsätze", styles["H1"]))
+        story.append(
+            Paragraph(
+                "Mögliche Kandidaten, nicht automatisch bestätigt. Diese Liste dient nur zur manuellen Prüfung.",
+                styles["Body"],
+            )
+        )
+        add_hypothesis_table(story, styles, hypothesis_candidate_report)
+
+    pdf.build(story, onFirstPage=footer, onLaterPages=footer)
+
+
+def build_hypothesis_pdf(
+    hypothesis_candidate_report: pd.DataFrame | None,
+    open_docs: pd.DataFrame,
+    open_bank: pd.DataFrame,
+    settlement_detail_report: pd.DataFrame | None = None,
+) -> None:
+    frame = hypothesis_candidate_report if hypothesis_candidate_report is not None else pd.DataFrame()
+    pdf = SimpleDocTemplate(
+        str(HYPOTHESIS_REPORT_PATH),
+        pagesize=landscape(A4),
+        rightMargin=0.8 * cm,
+        leftMargin=0.8 * cm,
+        topMargin=0.8 * cm,
+        bottomMargin=0.8 * cm,
+        title="Buchhaltungs Buddy Hypothesen-Report",
+    )
+    styles = get_styles()
+    story: list = []
+    story.append(Paragraph("Buchhaltungs Buddy", styles["Title"]))
+    story.append(Paragraph("Hypothesen-Report", styles["Subtitle"]))
+    story.append(Paragraph(f"Erstellt: {datetime.now().strftime('%d.%m.%Y %H:%M')}", styles["Small"]))
+    story.append(Spacer(1, 0.3 * cm))
+
+    residual_count = 0
+    if settlement_detail_report is not None and not settlement_detail_report.empty and "Rest" in settlement_detail_report:
+        residuals = settlement_detail_report.copy()
+        residuals["_rest_abs"] = pd.to_numeric(residuals["Rest"], errors="coerce").abs()
+        residual_count = int(residuals.loc[residuals["_rest_abs"] > 0.01, "tx_id"].astype(str).nunique()) if "tx_id" in residuals else int((residuals["_rest_abs"] > 0.01).sum())
+
+    story.append(Paragraph("1. Kurzfazit", styles["H1"]))
+    summary_rows = [
+        ["Kennzahl", "Wert"],
+        ["Offene Belege", len(open_docs)],
+        ["Offene FYRST-Umsätze", len(open_bank)],
+        ["Sammelumsatz-Restbeträge", residual_count],
+        ["Prüfkandidaten", len(frame)],
+    ]
+    story.append(make_table(summary_rows, [8 * cm, 3 * cm], header=True))
+    story.append(Spacer(1, 0.25 * cm))
+    story.append(
+        Paragraph(
+            "Mögliche Kandidaten aus offenen Belegen gegen offene FYRST-Umsätze und Restbeträge aus Sammelumsätzen. Nichts davon wird automatisch als Match bestätigt.",
+            styles["Body"],
+        )
+    )
+
+    story.append(PageBreak())
+    story.append(Paragraph("2. Offene Belege gegen Restbeträge / offene Umsätze", styles["H1"]))
+    add_hypothesis_table(story, styles, frame)
 
     pdf.build(story, onFirstPage=footer, onLaterPages=footer)
 
@@ -517,6 +609,74 @@ def add_package_table(story: list, styles: dict, frame: pd.DataFrame) -> None:
     headers = ["Plattform", "Auszahlung", "FYRST", "Plattform-Netto", "Belege", "Gebührenkand.", "Paketsumme", "Diff.", "Status", "Hinweis"]
     widths = [1.6 * cm, 1.8 * cm, 1.6 * cm, 2.0 * cm, 1.8 * cm, 2.2 * cm, 1.8 * cm, 1.4 * cm, 3.2 * cm, 10.0 * cm]
     add_table(story, styles, frame, cols, headers, widths)
+
+
+def add_etsy_chain_table(story: list, styles: dict, frame: pd.DataFrame) -> None:
+    if frame.empty:
+        story.append(Paragraph("Keine Zeilen.", styles["Body"]))
+        return
+    work = frame.copy()
+    work["Hinweis kurz"] = work.apply(etsy_chain_note, axis=1)
+    cols = [
+        "payout_date",
+        "payout_id",
+        "bank_date",
+        "bank_amount",
+        "platform_order_amount",
+        "platform_fee_amount",
+        "platform_detail_net",
+        "linked_doc_sum",
+        "candidate_fee_doc_sum",
+        "gap_to_bank",
+        "package_status",
+        "linked_doc_refs",
+        "candidate_fee_doc_refs",
+        "Hinweis kurz",
+    ]
+    headers = [
+        "Periode",
+        "Payout",
+        "FYRST",
+        "FYRST-Betrag",
+        "Etsy-Verkäufe",
+        "Etsy-Gebühren",
+        "Etsy-Netto",
+        "Accountable-Belege",
+        "Gebührenkandidaten",
+        "Diff.",
+        "Status",
+        "Ausgangsbelege",
+        "Gebührenbelege",
+        "Hinweis",
+    ]
+    widths = [
+        1.35 * cm,
+        2.05 * cm,
+        1.35 * cm,
+        1.25 * cm,
+        1.35 * cm,
+        1.35 * cm,
+        1.25 * cm,
+        1.45 * cm,
+        1.45 * cm,
+        1.05 * cm,
+        2.05 * cm,
+        2.95 * cm,
+        3.25 * cm,
+        3.45 * cm,
+    ]
+    add_table(story, styles, work, cols, headers, widths)
+
+
+def etsy_chain_note(row: pd.Series) -> str:
+    status = text(row.get("package_status"))
+    if status == "candidate_fees_do_not_close":
+        return "Gebührenkandidaten vorhanden; Summe passt noch nicht zur Auszahlung."
+    if status == "no_bank_bridge":
+        return "Etsy-Auszahlung ohne passende FYRST-Buchung im Upload."
+    if status == "no_accountable_sales_link":
+        return "Etsy-Verkäufe vorhanden; passende Accountable-Ausgangsbelege fehlen."
+    return text(row.get("note"))
 
 
 def add_settlement_detail_table(story: list, styles: dict, frame: pd.DataFrame) -> None:
@@ -624,6 +784,32 @@ def add_leftover_table(story: list, styles: dict, frame: pd.DataFrame) -> None:
     headers = ["Beleg", "Belegdatum", "Beleg", "Beleg-Gegenpartei", "Bankdatum", "Umsatz", "Bank-Gegenpartei", "Diff.", "Tage", "Score", "Empfehlung"]
     widths = [2.0 * cm, 1.7 * cm, 1.4 * cm, 3.2 * cm, 1.7 * cm, 1.4 * cm, 3.5 * cm, 1.2 * cm, 1.0 * cm, 1.2 * cm, 4.3 * cm]
     add_table(story, styles, frame.head(80), cols, headers, widths)
+
+
+def add_hypothesis_table(story: list, styles: dict, frame: pd.DataFrame) -> None:
+    if frame.empty:
+        story.append(Paragraph("Keine Zeilen.", styles["Body"]))
+        return
+    work = frame.copy()
+    work["doc_type"] = work["doc_type"].map({"income": "Einnahme", "expense": "Ausgabe"}).fillna(work["doc_type"]) if "doc_type" in work else ""
+    cols = [
+        "hypothesis_source",
+        "doc_ref",
+        "doc_type",
+        "doc_date",
+        "doc_amount",
+        "doc_counterparty",
+        "source_date",
+        "source_rest_amount",
+        "source_counterparty",
+        "amount_diff",
+        "day_diff",
+        "score",
+        "recommendation",
+    ]
+    headers = ["Quelle", "Beleg", "Typ", "Belegdatum", "Beleg", "Beleg-Gegenpartei", "Umsatz/Rest", "Rest/Umsatz", "Umsatz-Gegenpartei", "Diff.", "Tage", "Score", "Empfehlung"]
+    widths = [2.7 * cm, 2.0 * cm, 1.3 * cm, 1.6 * cm, 1.4 * cm, 3.2 * cm, 1.7 * cm, 1.5 * cm, 3.4 * cm, 1.1 * cm, 0.9 * cm, 1.0 * cm, 4.5 * cm]
+    add_table(story, styles, work.head(180), cols, headers, widths)
 
 
 def add_open_docs_table(story: list, styles: dict, frame: pd.DataFrame, title: str) -> None:
