@@ -1485,6 +1485,147 @@ def match_platform_payouts_to_bank(
     return pd.DataFrame(rows) if rows else empty_platform_bank_matches()
 
 
+def match_platform_details_to_bank(
+    docs: pd.DataFrame,
+    platform_transactions: pd.DataFrame,
+    bank: pd.DataFrame,
+    settings: MatchSettings,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Match supplier/platform charge details directly to bank rows.
+
+    This is intentionally narrow: it only handles platform detail rows that are
+    themselves payment-like charges. Monthly marketplace ledgers are not closed
+    by this function.
+    """
+    if docs.empty or platform_transactions.empty or bank.empty:
+        return empty_matches(), empty_links(), empty_platform_bank_matches()
+
+    details = platform_transactions[
+        platform_transactions["category"].astype(str).eq("charge")
+        & (platform_transactions["amount"].astype(float).abs() > 0.005)
+    ].copy()
+    if details.empty:
+        return empty_matches(), empty_links(), empty_platform_bank_matches()
+
+    docs_work = docs.copy()
+    docs_work["date"] = pd.to_datetime(docs_work["date"], errors="coerce")
+    details["date"] = pd.to_datetime(details["date"], errors="coerce")
+    bank_work = bank.copy()
+    bank_work["date"] = pd.to_datetime(bank_work["date"], errors="coerce")
+
+    tolerance = max(settings.tolerance_cents, 10) / 100
+    doc_detail_window = max(settings.direct_window_days, 45)
+    detail_bank_window = max(settings.direct_window_days, 21)
+
+    chain_candidates: list[tuple[float, pd.Series, pd.Series, pd.Series, float, int, int]] = []
+    for _, doc in docs_work.iterrows():
+        doc_amount = float(doc.get("signed_amount") or 0)
+        if doc_amount >= -0.005:
+            continue
+        possible_details = details[
+            (details["amount"].astype(float) * doc_amount > 0)
+            & (details["amount"].astype(float).sub(doc_amount).abs() <= tolerance)
+            & details.apply(lambda tx: platform_match_allowed(doc, tx), axis=1)
+        ].copy()
+        if possible_details.empty:
+            continue
+        possible_details["_doc_day_diff"] = possible_details["date"].apply(lambda value: date_distance(value, doc.get("date")))
+        possible_details = possible_details[possible_details["_doc_day_diff"] <= doc_detail_window].copy()
+        if possible_details.empty:
+            continue
+
+        for _, detail in possible_details.iterrows():
+            bank_candidates = bank_work[
+                (bank_work["amount"].astype(float).sub(float(detail.get("amount") or 0)).abs() <= tolerance)
+                & bank_work.apply(lambda tx: platform_detail_bank_text_hit(detail, tx), axis=1)
+            ].copy()
+            if bank_candidates.empty:
+                continue
+            bank_candidates["_bank_day_diff"] = bank_candidates["date"].apply(lambda value: date_distance(value, detail.get("date")))
+            bank_candidates = bank_candidates[bank_candidates["_bank_day_diff"] <= detail_bank_window].copy()
+            if bank_candidates.empty:
+                continue
+            bank_candidates["_text_score"] = bank_candidates["text"].apply(lambda text: text_similarity(detail.get("text", ""), text))
+            best_bank = bank_candidates.sort_values(["_text_score", "_bank_day_diff"], ascending=[False, True]).iloc[0]
+            doc_day_diff = int(detail["_doc_day_diff"])
+            bank_day_diff = int(best_bank["_bank_day_diff"])
+            amount_diff = abs(float(detail.get("amount") or 0) - doc_amount)
+            bank_amount_diff = abs(float(best_bank.get("amount") or 0) - float(detail.get("amount") or 0))
+            amount_score = 1 - min(1, max(amount_diff, bank_amount_diff) / max(tolerance, 0.01))
+            doc_date_score = 1 - min(1, doc_day_diff / max(doc_detail_window, 1))
+            bank_date_score = 1 - min(1, bank_day_diff / max(detail_bank_window, 1))
+            score = amount_score * 0.45 + doc_date_score * 0.20 + bank_date_score * 0.20 + float(best_bank["_text_score"]) * 0.15
+            chain_candidates.append((score, doc, detail, best_bank, max(amount_diff, bank_amount_diff), doc_day_diff, bank_day_diff))
+
+    chain_candidates.sort(key=lambda item: item[0], reverse=True)
+    doc_matches: list[dict[str, object]] = []
+    doc_links: list[dict[str, object]] = []
+    bank_rows: list[dict[str, object]] = []
+    used_docs: set[str] = set()
+    used_details: set[str] = set()
+    used_bank: set[str] = set()
+
+    for score, doc, detail, bank_tx, amount_diff, doc_day_diff, bank_day_diff in chain_candidates:
+        doc_id = str(doc.get("doc_id"))
+        detail_id = str(detail.get("tx_id"))
+        bank_id = str(bank_tx.get("tx_id"))
+        if doc_id in used_docs or detail_id in used_details or bank_id in used_bank:
+            continue
+        confidence = round(max(0.78, min(0.97, score)), 3)
+        match_id = stable_id("match", "platform_detail_bank_chain", doc_id, detail_id, bank_id)
+        payload = {
+            "method": "platform_detail_bank_chain",
+            "confidence": confidence,
+            "doc_sum": round(float(doc.get("signed_amount") or 0), 2),
+            "gap": round(float(detail.get("amount") or 0) - float(doc.get("signed_amount") or 0), 2),
+            "amount_diff": round(amount_diff, 2),
+            "day_diff": doc_day_diff,
+            "text_score": text_similarity(doc.get("text", ""), detail.get("text", "")),
+            "explanation": "Plattform-Detail passt zum Beleg und dieselbe Plattform-Zahlung ist direkt in FYRST gefunden.",
+        }
+        doc_matches.append(make_match_row(match_id, detail, 1, payload))
+        doc_links.append(make_link_row(match_id, doc))
+        bank_rows.append(
+            {
+                "bridge_id": stable_id("platformbank", "detail", detail_id, bank_id),
+                "platform_tx_id": detail_id,
+                "tx_id": bank_id,
+                "platform": detail.get("platform", ""),
+                "platform_date": detail.get("date"),
+                "platform_amount": round(float(detail.get("amount") or 0), 2),
+                "platform_category": detail.get("category", ""),
+                "platform_description": detail.get("description", ""),
+                "payout_id": detail.get("payout_id", ""),
+                "bank_date": bank_tx.get("date"),
+                "bank_amount": round(float(bank_tx.get("amount") or 0), 2),
+                "bank_source": bank_tx.get("source", ""),
+                "bank_counterparty": bank_tx.get("counterparty", ""),
+                "bank_description": bank_tx.get("description", ""),
+                "amount_diff": round(abs(float(bank_tx.get("amount") or 0) - float(detail.get("amount") or 0)), 2),
+                "day_diff": bank_day_diff,
+                "confidence": confidence,
+                "explanation": "Plattform-Detailzahlung direkt mit FYRST-Umsatz verbunden; gleiches Vorzeichen.",
+            }
+        )
+        used_docs.add(doc_id)
+        used_details.add(detail_id)
+        used_bank.add(bank_id)
+
+    return (
+        pd.DataFrame(doc_matches) if doc_matches else empty_matches(),
+        pd.DataFrame(doc_links) if doc_links else empty_links(),
+        pd.DataFrame(bank_rows) if bank_rows else empty_platform_bank_matches(),
+    )
+
+
+def platform_detail_bank_text_hit(detail: pd.Series, bank_tx: pd.Series) -> bool:
+    text = clean_text(f"{bank_tx.get('counterparty', '')} {bank_tx.get('description', '')} {bank_tx.get('text', '')}").lower()
+    platform = clean_text(detail.get("platform")).lower()
+    counterparty = clean_text(detail.get("counterparty")).lower()
+    payout_id = clean_text(detail.get("payout_id")).lower()
+    return bool(platform and platform in text) or bool(counterparty and counterparty in text) or bool(payout_id and payout_id in text)
+
+
 def platform_counterparty_one_to_one(
     docs: pd.DataFrame,
     platform_like: pd.DataFrame,

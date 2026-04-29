@@ -39,6 +39,7 @@ def build_document_evidence(
     bridges_by_pp = group_by(paypal_bank_matches, "pp_id")
     transfer_by_related = group_paypal_transfers_by_related(paypal)
     platform_bridges_by_payout = group_by(platform_bank_matches, "payout_id")
+    platform_bridges_by_tx = group_by(platform_bank_matches, "platform_tx_id")
 
     fyrst_links_by_doc = group_by(links, "doc_id")
     paypal_links_by_doc = group_by(paypal_doc_links, "doc_id")
@@ -81,7 +82,10 @@ def build_document_evidence(
                 continue
             platform_details.append((match, platform_tx))
             payout_id = str(platform_tx.get("payout_id") or "")
-            if payout_id:
+            platform_category = str(platform_tx.get("category") or "")
+            for _, bridge in platform_bridges_by_tx.get(platform_tx.get("tx_id"), pd.DataFrame()).iterrows():
+                platform_bridge_rows.append((platform_tx, bridge))
+            if payout_id and platform_category not in {"charge"}:
                 for _, bridge in platform_bridges_by_payout.get(payout_id, pd.DataFrame()).iterrows():
                     platform_bridge_rows.append((platform_tx, bridge))
 

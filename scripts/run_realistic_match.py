@@ -22,6 +22,7 @@ from reconcile.platforms import (  # noqa: E402
     assign_platform_payout_ids,
     deduplicate_platform_transactions,
     match_docs_to_platform,
+    match_platform_details_to_bank,
     match_platform_payouts_to_bank,
     parse_platform_file,
 )
@@ -147,6 +148,37 @@ def main() -> int:
         platform_doc_links,
         platform_bank_matches,
     )
+
+    non_complete_doc_ids = set(evidence.loc[evidence["evidence_level"] != "vollständig belegt", "doc_id"])
+    non_complete_docs = docs[docs["doc_id"].isin(non_complete_doc_ids)].copy()
+    supplemental_open_bank = build_open_bank_after_evidence(bank, matches, paypal_bank_matches, platform_bank_matches)
+    detail_doc_matches, detail_doc_links, detail_bank_matches = match_platform_details_to_bank(
+        non_complete_docs,
+        platform_transactions,
+        supplemental_open_bank,
+        settings,
+    )
+    if not detail_doc_matches.empty:
+        platform_doc_matches = concat_frames(platform_doc_matches, detail_doc_matches, subset=["match_id"])
+        platform_doc_links = concat_frames(platform_doc_links, detail_doc_links, subset=["match_id", "doc_id"])
+        platform_bank_matches = concat_frames(platform_bank_matches, detail_bank_matches, subset=["bridge_id"])
+
+    if not detail_doc_matches.empty:
+        evidence = build_document_evidence(
+            docs,
+            bank,
+            paypal,
+            matches,
+            links,
+            paypal_doc_matches,
+            paypal_doc_links,
+            paypal_bank_matches,
+            platform_transactions,
+            platform_doc_matches,
+            platform_doc_links,
+            platform_bank_matches,
+        )
+
     open_doc_ids = set(evidence.loc[evidence["evidence_level"] == "offen", "doc_id"])
     open_docs = docs[docs["doc_id"].isin(open_doc_ids)].copy()
     open_bank = build_open_bank_after_evidence(bank, matches, paypal_bank_matches, platform_bank_matches)
@@ -187,6 +219,9 @@ def main() -> int:
     write_csv(platform_package_matches, "platform_package_matches.csv")
     write_csv(platform_package_links, "platform_package_links.csv")
     write_csv(platform_package_report, "platform_package_report.csv")
+    write_csv(detail_doc_matches, "supplemental_platform_detail_bank_doc_matches.csv")
+    write_csv(detail_doc_links, "supplemental_platform_detail_bank_doc_links.csv")
+    write_csv(detail_bank_matches, "supplemental_platform_detail_bank_bridge.csv")
     write_csv(open_docs, "open_docs.csv")
     write_csv(open_bank, "open_bank.csv")
     write_csv(payout_report, "platform_payout_reconciliation.csv")
@@ -245,6 +280,7 @@ def main() -> int:
         "platform_bank_bridge": len(platform_bank_matches),
         "platform_package_matches": len(platform_package_matches),
         "platform_package_auto": int((platform_package_report["package_status"] == "auto_matched").sum()) if not platform_package_report.empty else 0,
+        "supplemental_platform_detail_bank_matches": len(detail_doc_matches),
         "complete_docs": int((evidence["evidence_level"] == "vollständig belegt").sum()),
         "partial_docs": int((evidence["evidence_level"] == "teilweise belegt").sum()),
         "open_docs": len(open_docs),
@@ -270,6 +306,18 @@ def main() -> int:
 
 def write_csv(frame: pd.DataFrame, name: str) -> None:
     frame.to_csv(OUTPUT_DIR / name, sep=";", index=False, encoding="utf-8-sig")
+
+
+def concat_frames(*frames: pd.DataFrame, subset: list[str] | None = None) -> pd.DataFrame:
+    non_empty = [frame for frame in frames if frame is not None and not frame.empty]
+    if not non_empty:
+        return frames[0].copy() if frames else pd.DataFrame()
+    result = pd.concat(non_empty, ignore_index=True)
+    if subset:
+        available = [column for column in subset if column in result.columns]
+        if available:
+            result = result.drop_duplicates(subset=available, keep="first")
+    return result
 
 
 def build_alias_control(docs: pd.DataFrame) -> pd.DataFrame:

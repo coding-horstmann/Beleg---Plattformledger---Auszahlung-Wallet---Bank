@@ -30,6 +30,7 @@ from reconcile.platforms import (
     assign_platform_payout_ids,
     deduplicate_platform_transactions,
     match_docs_to_platform,
+    match_platform_details_to_bank,
     match_platform_payouts_to_bank,
     parse_platform_file,
 )
@@ -181,6 +182,34 @@ def main() -> None:
             platform_doc_links,
             platform_bank_matches,
         )
+        non_complete_doc_ids = set(document_evidence.loc[document_evidence["evidence_level"] != "vollständig belegt", "doc_id"])
+        non_complete_docs = docs[docs["doc_id"].isin(non_complete_doc_ids)].copy()
+        supplemental_open_bank = build_open_bank_after_evidence(bank, matches, paypal_bank_matches, platform_bank_matches)
+        detail_doc_matches, detail_doc_links, detail_bank_matches = match_platform_details_to_bank(
+            non_complete_docs,
+            platform_transactions,
+            supplemental_open_bank,
+            settings,
+        )
+        if not detail_doc_matches.empty:
+            platform_doc_matches = concat_frames(platform_doc_matches, detail_doc_matches, subset=["match_id"])
+            platform_doc_links = concat_frames(platform_doc_links, detail_doc_links, subset=["match_id", "doc_id"])
+            platform_bank_matches = concat_frames(platform_bank_matches, detail_bank_matches, subset=["bridge_id"])
+        if not detail_doc_matches.empty:
+            document_evidence = build_document_evidence(
+                docs,
+                bank,
+                paypal,
+                matches,
+                links,
+                paypal_doc_matches,
+                paypal_doc_links,
+                paypal_bank_matches,
+                platform_transactions,
+                platform_doc_matches,
+                platform_doc_links,
+                platform_bank_matches,
+            )
         open_doc_ids = set(document_evidence.loc[document_evidence["evidence_level"] == "offen", "doc_id"])
         open_docs = docs[docs["doc_id"].isin(open_doc_ids)].copy()
         open_bank = build_open_bank_after_evidence(bank, matches, paypal_bank_matches, platform_bank_matches)
@@ -1421,6 +1450,18 @@ def to_csv_bytes(frame: pd.DataFrame) -> bytes:
         if pd.api.types.is_datetime64_any_dtype(prepared[col]):
             prepared[col] = prepared[col].dt.strftime("%Y-%m-%d")
     return prepared.to_csv(index=False, sep=";").encode("utf-8-sig")
+
+
+def concat_frames(*frames: pd.DataFrame, subset: list[str] | None = None) -> pd.DataFrame:
+    non_empty = [frame for frame in frames if frame is not None and not frame.empty]
+    if not non_empty:
+        return frames[0].copy() if frames else pd.DataFrame()
+    result = pd.concat(non_empty, ignore_index=True)
+    if subset:
+        available = [column for column in subset if column in result.columns]
+        if available:
+            result = result.drop_duplicates(subset=available, keep="first")
+    return result
 
 
 def build_pdf_report_bytes(
