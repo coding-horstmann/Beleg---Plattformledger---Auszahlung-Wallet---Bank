@@ -1385,6 +1385,7 @@ def show_pdf_download_buttons(
         "buchhaltungs_buddy_beleg_report.pdf",
         "application/pdf",
         key=f"{key_prefix}_beleg_pdf",
+        on_click="ignore",
         use_container_width=True,
         type="primary",
     )
@@ -1394,6 +1395,7 @@ def show_pdf_download_buttons(
         "buchhaltungs_buddy_kontroll_report.pdf",
         "application/pdf",
         key=f"{key_prefix}_kontroll_pdf",
+        on_click="ignore",
         use_container_width=True,
     )
     c3.download_button(
@@ -1402,6 +1404,7 @@ def show_pdf_download_buttons(
         "buchhaltungs_buddy_hypothesen_report.pdf",
         "application/pdf",
         key=f"{key_prefix}_hypothesen_pdf",
+        on_click="ignore",
         use_container_width=True,
     )
     c4.download_button(
@@ -1410,6 +1413,7 @@ def show_pdf_download_buttons(
         "buchhaltungs_buddy_ledger_experiment_report.pdf",
         "application/pdf",
         key=f"{key_prefix}_ledger_pdf",
+        on_click="ignore",
         use_container_width=True,
     )
 
